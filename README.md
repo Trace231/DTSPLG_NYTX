@@ -26,7 +26,7 @@
 ## 🚀 快速开始
 
 ### 1. 环境准备
-
+请先下载数据集：https://www.kaggle.com/competitions/new-york-city-taxi-fare-prediction/data
 ```bash
 pip install pandas numpy matplotlib seaborn scipy
 ```

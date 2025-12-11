@@ -912,7 +912,259 @@ class MultiStageSampling:
             },
             'true_mean': true_mean
         }
+    
+    def three_stage_sampling_by_features(self, first_stage_size=1000):
+        """
+        方法3：双阶段抽样，基于单独特征比例估计的分层抽样
         
+        第一阶段：简单随机抽样，估计各个分层特征（time_stratum, geo_cluster, passenger_stratum）
+                  各自的边际分布比例
+        第二阶段：基于估计的特征比例，进行分层抽样
+        
+        Parameters:
+        -----------
+        first_stage_size : int
+            第一阶段样本量
+            
+        Returns:
+        --------
+        final_sample : pd.DataFrame
+            最终的样本（第一阶段 + 第二阶段）
+        """
+        print("\n" + "="*80)
+        print("方法3：双阶段抽样（基于单独特征比例估计的分层抽样）")
+        print("="*80)
+        
+        # 确保stratum_cluster_key已创建
+        if 'stratum_cluster_key' not in self.data.columns:
+            self.data['stratum_cluster_key'] = (
+                self.data['time_stratum'] + '_' + 
+                self.data['geo_cluster'] + '_' + 
+                self.data['passenger_stratum']
+            )
+        
+        # 第一阶段：简单随机抽样，估计各特征的边际分布
+        print(f"\n【第一阶段】简单随机抽样（样本量: {first_stage_size:,}）")
+        np.random.seed(43)  # 使用不同的随机种子以区分方法
+        first_stage_sample = self.data.sample(n=min(first_stage_size, len(self.data)), random_state=43)
+        first_stage_sample = first_stage_sample.copy()
+        
+        print(f"第一阶段抽样完成，样本量: {len(first_stage_sample):,}")
+        
+        # 估计各特征的边际分布比例
+        print("\n【估计各特征的边际分布比例】")
+        
+        # 估计时间分层比例
+        time_proportions = first_stage_sample['time_stratum'].value_counts(normalize=True).sort_index()
+        print(f"\n时间分层估计比例（共{len(time_proportions)}层）：")
+        for stratum, prop in time_proportions.items():
+            print(f"  {stratum}: {prop:.4f} ({prop*100:.2f}%)")
+        
+        # 估计地理聚类比例
+        geo_proportions = first_stage_sample['geo_cluster'].value_counts(normalize=True).sort_index()
+        print(f"\n地理聚类估计比例（共{len(geo_proportions)}个聚类）：")
+        # 只显示前10个和后10个
+        if len(geo_proportions) > 20:
+            for cluster, prop in list(geo_proportions.items())[:10]:
+                print(f"  {cluster}: {prop:.4f} ({prop*100:.2f}%)")
+            print(f"  ... (省略 {len(geo_proportions)-20} 个聚类) ...")
+            for cluster, prop in list(geo_proportions.items())[-10:]:
+                print(f"  {cluster}: {prop:.4f} ({prop*100:.2f}%)")
+        else:
+            for cluster, prop in geo_proportions.items():
+                print(f"  {cluster}: {prop:.4f} ({prop*100:.2f}%)")
+        
+        # 估计乘客分层比例
+        passenger_proportions = first_stage_sample['passenger_stratum'].value_counts(normalize=True).sort_index()
+        print(f"\n乘客分层估计比例（共{len(passenger_proportions)}层）：")
+        for stratum, prop in passenger_proportions.items():
+            print(f"  {stratum}: {prop:.4f} ({prop*100:.2f}%)")
+        
+        # 基于估计的边际分布比例，计算各层的期望比例（假设特征独立）
+        # 实际中，我们可以按每个特征的边际比例来分配样本量
+        # 这里我们使用各特征边际比例的乘积来估计组合比例
+        
+        print("\n【第二阶段】基于估计特征比例的分层抽样")
+        
+        # 计算第二阶段目标样本量
+        second_stage_target = self.target_sample_size - len(first_stage_sample)
+        
+        # 方法：基于三个特征的估计比例，对每个组合单元分配样本量
+        # 组合比例 = 时间比例 × 地理比例 × 乘客比例（假设特征独立）
+        # 从第一阶段样本中获取每个stratum_key对应的三个特征值
+        stratum_features = first_stage_sample.groupby('stratum_cluster_key').agg({
+            'time_stratum': 'first',
+            'geo_cluster': 'first',
+            'passenger_stratum': 'first'
+        })
+        
+        allocation_info = pd.DataFrame(index=stratum_features.index)
+        allocation_info['estimated_proportion'] = 0.0
+        
+        for stratum_key, row in stratum_features.iterrows():
+            time_stratum = row['time_stratum']
+            geo_cluster = row['geo_cluster']
+            passenger_stratum = row['passenger_stratum']
+            
+            # 获取各特征的估计比例
+            time_prop = time_proportions.get(time_stratum, 0.0)
+            geo_prop = geo_proportions.get(geo_cluster, 0.0)
+            passenger_prop = passenger_proportions.get(passenger_stratum, 0.0)
+            
+            # 组合比例（假设特征独立）
+            allocation_info.loc[stratum_key, 'estimated_proportion'] = (
+                time_prop * geo_prop * passenger_prop
+            )
+        
+        # 同时考虑总体中可能存在的其他组合（在第一阶段没有出现的）
+        # 为了完整，我们也计算总体中所有可能的组合
+        all_strata = self.data.groupby('stratum_cluster_key').agg({
+            'time_stratum': 'first',
+            'geo_cluster': 'first',
+            'passenger_stratum': 'first'
+        })
+        
+        # 添加第一阶段没有出现的组合
+        new_strata = all_strata[~all_strata.index.isin(allocation_info.index)]
+        if len(new_strata) > 0:
+            for stratum_key, row in new_strata.iterrows():
+                time_stratum = row['time_stratum']
+                geo_cluster = row['geo_cluster']
+                passenger_stratum = row['passenger_stratum']
+                
+                time_prop = time_proportions.get(time_stratum, 0.0)
+                geo_prop = geo_proportions.get(geo_cluster, 0.0)
+                passenger_prop = passenger_proportions.get(passenger_stratum, 0.0)
+                
+                allocation_info.loc[stratum_key, 'estimated_proportion'] = (
+                    time_prop * geo_prop * passenger_prop
+                )
+        
+        # 归一化（因为可能有些组合在第一阶段没有出现）
+        total_prop = allocation_info['estimated_proportion'].sum()
+        if total_prop > 0:
+            allocation_info['estimated_proportion'] = allocation_info['estimated_proportion'] / total_prop
+        
+        # 基于估计比例分配样本量
+        allocation_info['allocation'] = (
+            allocation_info['estimated_proportion'] * second_stage_target
+        ).astype(int)
+        
+        # 确保每个在第一阶段出现的单元至少分配到1个样本
+        first_stage_strata = set(first_stage_sample['stratum_cluster_key'].unique())
+        for stratum_key in first_stage_strata:
+            if stratum_key in allocation_info.index and allocation_info.loc[stratum_key, 'allocation'] == 0:
+                allocation_info.loc[stratum_key, 'allocation'] = 1
+        
+        # 如果还有剩余样本量，按比例分配
+        allocated_total = allocation_info['allocation'].sum()
+        remaining = second_stage_target - allocated_total
+        if remaining > 0:
+            # 按估计比例分配剩余样本量
+            valid_allocation = allocation_info[allocation_info['estimated_proportion'] > 0].copy()
+            if len(valid_allocation) > 0:
+                additional_allocation = (valid_allocation['estimated_proportion'] * remaining).astype(int)
+                allocation_info.loc[valid_allocation.index, 'allocation'] += additional_allocation
+                # 分配最后的余数
+                final_remaining = second_stage_target - allocation_info['allocation'].sum()
+                if final_remaining > 0 and len(valid_allocation) > 0:
+                    # 分配给估计比例最大的前几个单元
+                    top_strata = valid_allocation.nlargest(int(final_remaining), 'estimated_proportion').index
+                    allocation_info.loc[top_strata, 'allocation'] += 1
+        
+        # 确保 allocation 列始终是整数类型
+        allocation_info['allocation'] = allocation_info['allocation'].astype(int)
+        
+        # 添加真实值用于对比
+        true_allocation_info = self.data.groupby('stratum_cluster_key').agg({
+            'fare_amount': 'count'
+        })
+        true_allocation_info.columns = ['N_h_true']
+        true_allocation_info['true_proportion'] = true_allocation_info['N_h_true'] / true_allocation_info['N_h_true'].sum()
+        
+        allocation_info = allocation_info.join(true_allocation_info, how='left')
+        allocation_info['N_h_true'] = allocation_info['N_h_true'].fillna(0).astype(int)
+        allocation_info['true_proportion'] = allocation_info['true_proportion'].fillna(0)
+        
+        # 计算估计误差
+        allocation_info['proportion_error'] = (
+            allocation_info['estimated_proportion'] - allocation_info['true_proportion']
+        )
+        
+        actual_sample_size = allocation_info['allocation'].sum()
+        total_with_phase1 = actual_sample_size + len(first_stage_sample)
+        
+        print(f"第一阶段样本量: {len(first_stage_sample):,}")
+        print(f"第二阶段目标样本量: {second_stage_target:,}")
+        print(f"第二阶段实际分配样本量: {actual_sample_size:,}")
+        print(f"总样本量: {total_with_phase1:,}")
+        print(f"\n分配统计：")
+        print(f"有效单元数: {(allocation_info['allocation'] > 0).sum()}")
+        if (allocation_info['allocation'] > 0).sum() > 0:
+            print(f"平均每单元样本量: {allocation_info[allocation_info['allocation'] > 0]['allocation'].mean():.1f}")
+        
+        # 显示比例估计的准确性
+        valid_errors = allocation_info[
+            (allocation_info['estimated_proportion'] > 0) | (allocation_info['true_proportion'] > 0)
+        ]
+        if len(valid_errors) > 0:
+            mae_proportion = valid_errors['proportion_error'].abs().mean()
+            print(f"\n比例估计准确性（MAE）: {mae_proportion:.6f}")
+        
+        self.allocation_info_method3 = allocation_info
+        self.time_proportions_est = time_proportions
+        self.geo_proportions_est = geo_proportions
+        self.passenger_proportions_est = passenger_proportions
+        
+        # 第二阶段：基于估计的比例进行分层抽样
+        print(f"\n从 {(allocation_info['allocation'] > 0).sum():,} 个分层聚类单元中抽样...")
+        second_stage_samples = []
+        
+        valid_units = allocation_info[allocation_info['allocation'] > 0]
+        
+        # 使用tqdm显示进度
+        for stratum_key, row in tqdm(valid_units.iterrows(), 
+                                     total=len(valid_units),
+                                     desc="第二阶段抽样",
+                                     unit="单元"):
+            n_sample = int(row['allocation'])
+            if n_sample > 0:
+                # 从剩余的总体中抽取（排除第一阶段已抽取的样本）
+                unit_data = self.data[
+                    (self.data['stratum_cluster_key'] == stratum_key) & 
+                    (~self.data.index.isin(first_stage_sample.index))
+                ].copy()
+                
+                if len(unit_data) > 0:
+                    # 如果需要的样本数大于可用数据，则全部抽取
+                    if n_sample >= len(unit_data):
+                        sample_unit = unit_data
+                    else:
+                        # 系统抽样
+                        unit_data = unit_data.sort_values('pickup_datetime')
+                        k = len(unit_data) / n_sample
+                        start = np.random.uniform(0, k)
+                        indices = [int(start + i * k) for i in range(n_sample)]
+                        indices = [idx for idx in indices if idx < len(unit_data)]
+                        sample_unit = unit_data.iloc[indices].copy()
+                    
+                    second_stage_samples.append(sample_unit)
+        
+        second_stage_sample = pd.concat(second_stage_samples, ignore_index=True) if second_stage_samples else pd.DataFrame()
+        
+        # 合并第一阶段和第二阶段样本
+        final_sample = pd.concat([first_stage_sample, second_stage_sample], ignore_index=True)
+        
+        print(f"第二阶段抽样完成，样本量: {len(second_stage_sample):,}")
+        print(f"总样本量: {len(final_sample):,}")
+        print(f"抽样比例: {len(final_sample) / len(self.data) * 100:.4f}%")
+        
+        self.final_sample_method3 = final_sample
+        self.first_stage_sample_method3 = first_stage_sample
+        self.second_stage_sample_method3 = second_stage_sample
+        
+        return final_sample
+    
     def generate_report(self, enable_bootstrap=False, n_bootstrap=1000, bootstrap_alpha=0.05):
         """
         生成抽样报告
@@ -951,6 +1203,134 @@ class MultiStageSampling:
         self.compare_with_srs()
         
         print("\n" + "="*80)
+    
+    def compare_three_methods(self, first_stage_size=1000):
+        """
+        对比三种抽样方法的估计结果
+        
+        Parameters:
+        -----------
+        first_stage_size : int
+            方法2和方法3中第一阶段的样本量
+            
+        Returns:
+        --------
+        dict : 包含三种方法估计结果的字典
+        """
+        print("\n" + "="*80)
+        print("三种抽样方法对比")
+        print("="*80)
+        
+        true_mean = self.data['fare_amount'].mean()
+        true_std = self.data['fare_amount'].std()
+        
+        # 方法1的结果
+        method1_mean = self.final_sample['fare_amount'].mean()
+        method1_std = self.final_sample['fare_amount'].std()
+        method1_se = method1_std / np.sqrt(len(self.final_sample))
+        method1_bias = abs(method1_mean - true_mean)
+        method1_relative_error = method1_bias / true_mean * 100
+        
+        # 方法2的结果
+        method2_mean = self.final_sample_two_stage['fare_amount'].mean()
+        method2_std = self.final_sample_two_stage['fare_amount'].std()
+        method2_se = method2_std / np.sqrt(len(self.final_sample_two_stage))
+        method2_bias = abs(method2_mean - true_mean)
+        method2_relative_error = method2_bias / true_mean * 100
+        
+        # 方法3的结果
+        method3_mean = self.final_sample_method3['fare_amount'].mean()
+        method3_std = self.final_sample_method3['fare_amount'].std()
+        method3_se = method3_std / np.sqrt(len(self.final_sample_method3))
+        method3_bias = abs(method3_mean - true_mean)
+        method3_relative_error = method3_bias / true_mean * 100
+        
+        # 输出对比表
+        print(f"\n{'指标':<25} {'方法1（已知比例）':<25} {'方法2（估计组合比例）':<30} {'方法3（估计特征比例）':<30}")
+        print("-" * 115)
+        print(f"{'样本量':<25} {len(self.final_sample):<25,} {len(self.final_sample_two_stage):<30,} {len(self.final_sample_method3):<30,}")
+        print(f"{'均值估计':<25} ${method1_mean:<24.2f} ${method2_mean:<29.2f} ${method3_mean:<29.2f}")
+        print(f"{'标准误':<25} ${method1_se:<24.2f} ${method2_se:<29.2f} ${method3_se:<29.2f}")
+        print(f"{'绝对偏差':<25} ${method1_bias:<24.2f} ${method2_bias:<29.2f} ${method3_bias:<29.2f}")
+        print(f"{'相对误差 (%)':<25} {method1_relative_error:<24.2f} {method2_relative_error:<29.2f} {method3_relative_error:<29.2f}")
+        print(f"{'95% CI下限':<25} ${method1_mean-1.96*method1_se:<24.2f} ${method2_mean-1.96*method2_se:<29.2f} ${method3_mean-1.96*method3_se:<29.2f}")
+        print(f"{'95% CI上限':<25} ${method1_mean+1.96*method1_se:<24.2f} ${method2_mean+1.96*method2_se:<29.2f} ${method3_mean+1.96*method3_se:<29.2f}")
+        print(f"{'真实总体均值':<25} ${true_mean:<24.2f} {'-':<30} {'-':<30}")
+        
+        # 方法说明
+        print("\n" + "="*80)
+        print("方法说明")
+        print("="*80)
+        print("方法1（已知真实比例）：")
+        print("  - 假设已知各层（时间×地理×乘客）的真实大小和比例")
+        print("  - 直接基于真实比例进行样本量分配")
+        print("  - 适合：理论分析、对比基准")
+        print("  - 局限：实际调查中通常不知道总体真实比例")
+        
+        print("\n方法2（估计组合比例）：")
+        print("  - 第一阶段：简单随机抽样，估计各层组合（时间×地理×乘客）的比例")
+        print("  - 第二阶段：基于估计的组合比例进行分层抽样")
+        print("  - 适合：总体结构未知，需要估计组合比例的场景")
+        print("  - 优势：直接估计最终使用的组合层比例，理论上更精确")
+        
+        print("\n方法3（估计特征比例）：")
+        print("  - 第一阶段：简单随机抽样，估计各特征（时间、地理、乘客）的边际分布")
+        print("  - 第二阶段：基于特征边际比例的乘积（假设特征独立）进行分层抽样")
+        print("  - 适合：特征独立或近似独立的场景")
+        print("  - 优势：只需要估计少量参数（特征数），计算简单")
+        print("  - 局限：假设特征独立可能不符合实际情况")
+        
+        # 找出最佳方法
+        print("\n" + "="*80)
+        print("结论")
+        print("="*80)
+        errors = {
+            '方法1': method1_relative_error,
+            '方法2': method2_relative_error,
+            '方法3': method3_relative_error
+        }
+        best_method = min(errors, key=errors.get)
+        print(f"✓ 估计精度最高：{best_method}（相对误差 {errors[best_method]:.2f}%）")
+        
+        if method2_relative_error <= method1_relative_error * 1.05:
+            print("✓ 方法2（估计组合比例）与方法1（已知比例）精度相近")
+            print("  说明第一阶段抽样能够较好地估计组合层比例")
+        
+        if method3_relative_error <= method1_relative_error * 1.1:
+            print("✓ 方法3（估计特征比例）估计精度可接受")
+            if method3_relative_error > method2_relative_error:
+                print("  ⚠ 但如果特征之间存在相关性，方法2会更准确")
+        
+        return {
+            'method1': {
+                'sample_size': len(self.final_sample),
+                'mean': method1_mean,
+                'se': method1_se,
+                'bias': method1_bias,
+                'relative_error': method1_relative_error,
+                'ci_lower': method1_mean - 1.96 * method1_se,
+                'ci_upper': method1_mean + 1.96 * method1_se
+            },
+            'method2': {
+                'sample_size': len(self.final_sample_two_stage),
+                'mean': method2_mean,
+                'se': method2_se,
+                'bias': method2_bias,
+                'relative_error': method2_relative_error,
+                'ci_lower': method2_mean - 1.96 * method2_se,
+                'ci_upper': method2_mean + 1.96 * method2_se
+            },
+            'method3': {
+                'sample_size': len(self.final_sample_method3),
+                'mean': method3_mean,
+                'se': method3_se,
+                'bias': method3_bias,
+                'relative_error': method3_relative_error,
+                'ci_lower': method3_mean - 1.96 * method3_se,
+                'ci_upper': method3_mean + 1.96 * method3_se
+            },
+            'true_mean': true_mean
+        }
 
 
 def main():
@@ -1066,6 +1446,29 @@ def main():
     # 保存双阶段抽样样本
     sampler.final_sample_two_stage.to_csv('sampled_data_method2.csv', index=False)
     print("\n方法2样本已保存至: sampled_data_method2.csv")
+    
+    # ===== 方法3：双阶段抽样（基于单独特征比例估计）=====
+    print("\n" + "="*80)
+    print("方法3：双阶段抽样（基于单独特征比例估计的分层抽样）")
+    print("="*80)
+    
+    # 执行方法3：基于单独特征比例估计的双阶段抽样
+    sampler.three_stage_sampling_by_features(first_stage_size=1000)
+    
+    # 保存方法3的样本
+    sampler.final_sample_method3.to_csv('sampled_data_method3.csv', index=False)
+    print("\n方法3样本已保存至: sampled_data_method3.csv")
+    
+    # ===== 三种方法对比 =====
+    comparison_results = sampler.compare_three_methods(first_stage_size=1000)
+    
+    print("\n" + "="*80)
+    print("三种方法执行完成！")
+    print("="*80)
+    print("\n已保存的文件：")
+    print("  - sampled_data_method1.csv: 方法1（已知真实比例）的样本")
+    print("  - sampled_data_method2.csv: 方法2（估计组合比例）的样本")
+    print("  - sampled_data_method3.csv: 方法3（估计特征比例）的样本")
     
     return sampler
 
