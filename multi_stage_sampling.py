@@ -599,11 +599,20 @@ class MultiStageSampling:
             'bootstrap_means': bootstrap_means
         }
     
-    def estimate_mean_fare(self):
+    def estimate_mean_fare(self, enable_bootstrap=False, n_bootstrap=1000, bootstrap_alpha=0.05):
         """
         估计总体平均车费
         
         使用分层抽样的估计公式，但需要考虑多阶段结构
+        
+        Parameters:
+        -----------
+        enable_bootstrap : bool, default=False
+            是否启用Bootstrap方法计算置信区间
+        n_bootstrap : int, default=1000
+            Bootstrap重抽样次数（仅在enable_bootstrap=True时使用）
+        bootstrap_alpha : float, default=0.05
+            Bootstrap显著性水平（仅在enable_bootstrap=True时使用）
         """
         print("\n=== 估计总体平均车费 ===")
         
@@ -683,12 +692,15 @@ class MultiStageSampling:
         print(f"标准误: ${se_st:.2f}")
         print(f"95%理论置信区间: [${ci_st_lower_theoretical:.2f}, ${ci_st_upper_theoretical:.2f}]")
         
-        # Bootstrap置信区间
-        print("\n正在计算Bootstrap置信区间...")
-        ci_bootstrap = self.bootstrap_confidence_interval(n_bootstrap=1000, alpha=0.05)
-        
-        print(f"95%Bootstrap置信区间: [${ci_bootstrap['lower']:.2f}, ${ci_bootstrap['upper']:.2f}]")
-        print(f"Bootstrap方法: {ci_bootstrap['method']}")
+        # Bootstrap置信区间（可选）
+        ci_bootstrap = None
+        bootstrap_covers = None
+        if enable_bootstrap:
+            print("\n正在计算Bootstrap置信区间...")
+            ci_bootstrap = self.bootstrap_confidence_interval(n_bootstrap=n_bootstrap, alpha=bootstrap_alpha)
+            
+            print(f"95%Bootstrap置信区间: [${ci_bootstrap['lower']:.2f}, ${ci_bootstrap['upper']:.2f}]")
+            print(f"Bootstrap方法: {ci_bootstrap['method']}")
         
         # 总体均值（真实值，用于比较）
         true_mean = self.data['fare_amount'].mean()
@@ -698,10 +710,14 @@ class MultiStageSampling:
         
         # 置信区间覆盖情况
         theoretical_covers = (ci_st_lower_theoretical <= true_mean <= ci_st_upper_theoretical)
-        bootstrap_covers = (ci_bootstrap['lower'] <= true_mean <= ci_bootstrap['upper'])
-        print(f"\n置信区间覆盖情况（真实均值是否在区间内）:")
-        print(f"  理论CI: {'✓ 覆盖' if theoretical_covers else '✗ 未覆盖'}")
-        print(f"  Bootstrap CI: {'✓ 覆盖' if bootstrap_covers else '✗ 未覆盖'}")
+        if enable_bootstrap and ci_bootstrap is not None:
+            bootstrap_covers = (ci_bootstrap['lower'] <= true_mean <= ci_bootstrap['upper'])
+            print(f"\n置信区间覆盖情况（真实均值是否在区间内）:")
+            print(f"  理论CI: {'✓ 覆盖' if theoretical_covers else '✗ 未覆盖'}")
+            print(f"  Bootstrap CI: {'✓ 覆盖' if bootstrap_covers else '✗ 未覆盖'}")
+        else:
+            print(f"\n置信区间覆盖情况（真实均值是否在区间内）:")
+            print(f"  理论CI: {'✓ 覆盖' if theoretical_covers else '✗ 未覆盖'}")
         
         # 设计效应（Design Effect）
         deff = (se_st / se_simple) ** 2
@@ -711,7 +727,7 @@ class MultiStageSampling:
         elif deff > 1:
             print("⚠ 分层抽样的效率略低于简单随机抽样（可能是由于聚类效应）")
         
-        return {
+        result = {
             'simple_mean': sample_mean,
             'stratified_mean': y_bar_st,
             'true_mean': true_mean,
@@ -719,10 +735,18 @@ class MultiStageSampling:
             'se_stratified': se_st,
             'ci_95_lower_theoretical': ci_st_lower_theoretical,
             'ci_95_upper_theoretical': ci_st_upper_theoretical,
-            'ci_95_lower_bootstrap': ci_bootstrap['lower'],
-            'ci_95_upper_bootstrap': ci_bootstrap['upper'],
             'deff': deff
         }
+        
+        # 仅在启用Bootstrap时添加相关字段
+        if enable_bootstrap and ci_bootstrap is not None:
+            result['ci_95_lower_bootstrap'] = ci_bootstrap['lower']
+            result['ci_95_upper_bootstrap'] = ci_bootstrap['upper']
+        else:
+            result['ci_95_lower_bootstrap'] = None
+            result['ci_95_upper_bootstrap'] = None
+        
+        return result
     
     def compare_with_srs(self):
         """与简单随机抽样进行对比"""
@@ -888,8 +912,19 @@ class MultiStageSampling:
             'true_mean': true_mean
         }
         
-    def generate_report(self):
-        """生成抽样报告"""
+    def generate_report(self, enable_bootstrap=False, n_bootstrap=1000, bootstrap_alpha=0.05):
+        """
+        生成抽样报告
+        
+        Parameters:
+        -----------
+        enable_bootstrap : bool, default=False
+            是否启用Bootstrap方法计算置信区间
+        n_bootstrap : int, default=1000
+            Bootstrap重抽样次数（仅在enable_bootstrap=True时使用）
+        bootstrap_alpha : float, default=0.05
+            Bootstrap显著性水平（仅在enable_bootstrap=True时使用）
+        """
         print("\n" + "="*80)
         print("多阶段复合抽样设计报告")
         print("="*80)
@@ -909,7 +944,9 @@ class MultiStageSampling:
         print("- 聚类抽样（Cluster Sampling）的成本效益优势")
         print("- 系统抽样（Systematic Sampling）的操作便利性")
         
-        results = self.estimate_mean_fare()
+        results = self.estimate_mean_fare(enable_bootstrap=enable_bootstrap, 
+                                         n_bootstrap=n_bootstrap, 
+                                         bootstrap_alpha=bootstrap_alpha)
         self.compare_with_srs()
         
         print("\n" + "="*80)

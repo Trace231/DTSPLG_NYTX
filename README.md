@@ -121,10 +121,8 @@ $$\text{Deff} = \frac{\text{Var}(\bar{y}_{design})}{\text{Var}(\bar{y}_{srs})}$$
 2. **内存占用**：完整数据可能占用较多内存，可根据机器配置调整 `nrows` 参数
 3. **运行时间**：对比脚本会运行多次抽样，可能需要几分钟时间
 
-## 🎓 学术引用建议
-
-如果用于作业报告，建议参考：
-
+## 🎓 学术引用
+主要参考文献为：
 - Lohr, S. L. (2019). Sampling: Design and Analysis (3rd ed.)
 - Cochran, W. G. (1977). Sampling Techniques (3rd ed.)
 
