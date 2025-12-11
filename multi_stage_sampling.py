@@ -15,6 +15,7 @@ from datetime import datetime
 import warnings
 from tqdm import tqdm
 from scipy.stats import norm
+import argparse
 warnings.filterwarnings('ignore')
 
 class MultiStageSampling:
@@ -955,14 +956,77 @@ class MultiStageSampling:
 def main():
     """主函数：执行完整的抽样流程"""
     
+    # 解析命令行参数
+    parser = argparse.ArgumentParser(
+        description='多阶段复合抽样设计：估计纽约出租车平均费用',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+示例用法:
+  # 默认运行（Bootstrap关闭）
+  python multi_stage_sampling.py
+  
+  # 启用Bootstrap（使用默认参数）
+  python multi_stage_sampling.py --enable-bootstrap
+  
+  # 启用Bootstrap并自定义参数
+  python multi_stage_sampling.py --enable-bootstrap --n-bootstrap 2000 --bootstrap-alpha 0.01
+  
+  # 自定义数据路径和样本量
+  python multi_stage_sampling.py --data-path train.csv --sample-size 10000 --enable-bootstrap
+        """
+    )
+    
+    parser.add_argument(
+        '--data-path',
+        type=str,
+        default='train.csv',
+        help='数据文件路径（默认: train.csv）'
+    )
+    
+    parser.add_argument(
+        '--sample-size',
+        type=int,
+        default=5000,
+        help='总样本量（默认: 5000）'
+    )
+    
+    parser.add_argument(
+        '--nrows',
+        type=int,
+        default=500000,
+        help='加载数据的行数（默认: 500000）'
+    )
+    
+    parser.add_argument(
+        '--enable-bootstrap',
+        action='store_true',
+        help='启用Bootstrap方法计算置信区间（默认: False）'
+    )
+    
+    parser.add_argument(
+        '--n-bootstrap',
+        type=int,
+        default=1000,
+        help='Bootstrap重抽样次数（仅在启用Bootstrap时有效，默认: 1000）'
+    )
+    
+    parser.add_argument(
+        '--bootstrap-alpha',
+        type=float,
+        default=0.05,
+        help='Bootstrap显著性水平（仅在启用Bootstrap时有效，默认: 0.05）'
+    )
+    
+    args = parser.parse_args()
+    
     # 初始化抽样设计
     sampler = MultiStageSampling(
-        data_path='train.csv',
-        sample_size=5000  # 总样本量
+        data_path=args.data_path,
+        sample_size=args.sample_size
     )
     
     # 加载数据（可以先用部分数据测试）
-    sampler.load_data(nrows=500000)  # 使用50万条记录进行演示
+    sampler.load_data(nrows=args.nrows)
     
     # 执行各层设计
     sampler.create_time_strata()
@@ -980,8 +1044,12 @@ def main():
     # 执行抽样
     sampler.draw_sample()
     
-    # 估计和报告
-    sampler.generate_report()
+    # 估计和报告（传递命令行参数）
+    sampler.generate_report(
+        enable_bootstrap=args.enable_bootstrap,
+        n_bootstrap=args.n_bootstrap,
+        bootstrap_alpha=args.bootstrap_alpha
+    )
     
     # 保存样本
     sampler.final_sample.to_csv('sampled_data_method1.csv', index=False)
