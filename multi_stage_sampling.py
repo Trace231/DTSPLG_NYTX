@@ -2,11 +2,12 @@
 多阶段复合抽样设计：估计纽约出租车平均费用
 设计要素：
 1. 按时间区间分层（Stratified Sampling by Time Period）
-2. 按地理位置聚类（Cluster Sampling by Geographic Region）
+2. 按距离范围分层（Stratified Sampling by Distance Range）- 替代地理聚类
 3. 按乘客人数分层（Stratified Sampling by Passenger Count）
 4. 结合系统抽样（Systematic Sampling）
 
 这是一个三层嵌套的混合抽样设计
+注意：第二层已从地理聚类改为距离范围分层，更简单且对车费预测更有意义
 """
 
 import pandas as pd
@@ -17,6 +18,7 @@ from tqdm import tqdm
 from scipy.stats import norm
 import argparse
 warnings.filterwarnings('ignore')
+
 
 class MultiStageSampling:
     """多阶段复合抽样设计类"""
@@ -67,16 +69,27 @@ class MultiStageSampling:
         print(f"数据加载完成，有效记录数: {len(self.data):,}")
         return self.data
     
-    def create_time_strata(self):
+    def create_time_strata(self, simplify=False):
         """
         第一层：按时间区间分层
         
         将数据按年份或季度分层，可以根据数据的时间分布灵活调整
+        
+        Parameters:
+        -----------
+        simplify : bool, default=False
+            如果为True，只按年份分层（不按季度），减少层数
         """
         print("\n=== 第一层：创建时间分层 ===")
         self.data['year'] = self.data['pickup_datetime'].dt.year
-        self.data['quarter'] = self.data['pickup_datetime'].dt.quarter
-        self.data['time_stratum'] = self.data['year'].astype(str) + '-Q' + self.data['quarter'].astype(str)
+        if simplify:
+            # 简化模式：只按年份分层
+            self.data['time_stratum'] = self.data['year'].astype(str)
+            print("使用简化模式：只按年份分层")
+        else:
+            # 完整模式：按年份-季度分层
+            self.data['quarter'] = self.data['pickup_datetime'].dt.quarter
+            self.data['time_stratum'] = self.data['year'].astype(str) + '-Q' + self.data['quarter'].astype(str)
         
         # 统计各层信息
         stratum_info = self.data.groupby('time_stratum').agg({
@@ -90,70 +103,180 @@ class MultiStageSampling:
         
         return stratum_info
     
-    def create_geographic_clusters(self):
+    def create_geographic_clusters(self, method='distance', n_clusters=50, use_route_similarity=False):
         """
-        第二层：按地理位置聚类
+        第二层：按距离范围分层（替代地理聚类）
         
-        使用上车位置的经纬度，将纽约市划分为若干地理区域（聚类）
-        方法：使用网格划分或K-means聚类
+        使用pickup和dropoff之间的距离，将行程分为若干距离范围（如：短途、中途、长途）
+        这种方法比地理聚类更简单，且对车费预测更有意义
+        
+        Parameters:
+        -----------
+        method : str, default='distance'
+            保留此参数以兼容现有代码，但实际使用距离范围分层
+        n_clusters : int, default=50
+            距离范围的数量（将被转换为距离分位数）
+        use_route_similarity : bool, default=False
+            保留此参数以兼容现有代码，但实际不使用
         """
-        print("\n=== 第二层：创建地理聚类 ===")
+        print("\n=== 第二层：创建距离范围分层（替代地理聚类） ===")
+        print(f"将使用距离范围替代地理聚类，距离范围数: {n_clusters}")
         
-        # 方法1：网格划分（更直观，适合解释）
-        # 将纽约市划分为网格（例如：10x10的网格）
-        grid_size = 10
+        # 计算路线距离（Haversine距离）
+        def haversine_distance_vectorized(lon1, lat1, lon2, lat2):
+            """向量化计算两点间的Haversine距离（公里）"""
+            R = 6371  # 地球半径（公里）
+            dlat = np.radians(lat2 - lat1)
+            dlon = np.radians(lon2 - lon1)
+            a = np.sin(dlat/2)**2 + np.cos(np.radians(lat1)) * np.cos(np.radians(lat2)) * np.sin(dlon/2)**2
+            c = 2 * np.arctan2(np.sqrt(a), np.sqrt(1-a))
+            return R * c
         
-        # 计算经纬度范围
-        lon_min, lon_max = self.data['pickup_longitude'].min(), self.data['pickup_longitude'].max()
-        lat_min, lat_max = self.data['pickup_latitude'].min(), self.data['pickup_latitude'].max()
+        # 检查必要的列是否存在
+        required_cols = ['pickup_longitude', 'pickup_latitude', 
+                        'dropoff_longitude', 'dropoff_latitude']
+        missing_cols = [col for col in required_cols if col not in self.data.columns]
+        if missing_cols:
+            raise ValueError(f"缺少必要的列: {missing_cols}")
         
-        # 创建网格
-        lon_step = (lon_max - lon_min) / grid_size
-        lat_step = (lat_max - lat_min) / grid_size
+        # 检查并处理NaN值
+        valid_mask = ~(
+            self.data[required_cols].isna().any(axis=1)
+        )
+        n_invalid = (~valid_mask).sum()
+        if n_invalid > 0:
+            print(f"警告：发现 {n_invalid} 条记录包含NaN值，将在计算距离时排除这些记录")
         
-        def assign_grid_cluster(row):
-            """将经纬度映射到网格聚类"""
-            lon_idx = int((row['pickup_longitude'] - lon_min) / lon_step)
-            lat_idx = int((row['pickup_latitude'] - lat_min) / lat_step)
-            # 防止超出边界
-            lon_idx = min(lon_idx, grid_size - 1)
-            lat_idx = min(lat_idx, grid_size - 1)
-            return f"Grid_{lon_idx}_{lat_idx}"
+        if valid_mask.sum() == 0:
+            raise ValueError("所有记录的经纬度都包含NaN值，无法计算距离")
         
-        self.data['geo_cluster'] = self.data.apply(assign_grid_cluster, axis=1)
+        # 向量化计算路线距离
+        print("正在计算pickup和dropoff之间的距离...")
+        route_distances = np.full(len(self.data), np.nan)
+        route_distances[valid_mask] = haversine_distance_vectorized(
+            self.data.loc[valid_mask, 'pickup_longitude'].values,
+            self.data.loc[valid_mask, 'pickup_latitude'].values,
+            self.data.loc[valid_mask, 'dropoff_longitude'].values,
+            self.data.loc[valid_mask, 'dropoff_latitude'].values
+        )
         
-        # 统计聚类信息
+        # 将距离保存到数据中（可选，用于后续分析）
+        self.data['route_distance_km'] = route_distances
+        
+        # 根据距离分位数创建距离范围
+        # 使用分位数确保每个范围的大小大致相等
+        valid_distances = route_distances[valid_mask]
+        
+        if n_clusters <= 1:
+            # 如果只有1个或更少的范围，使用简单的阈值
+            distance_thresholds = [0, np.inf]
+            distance_labels = ['Distance_All']
+        else:
+            # 计算分位数作为阈值
+            percentiles = np.linspace(0, 100, n_clusters + 1)
+            distance_thresholds = np.percentile(valid_distances, percentiles)
+            # 确保第一个阈值是0，最后一个阈值是inf
+            distance_thresholds[0] = 0
+            distance_thresholds[-1] = np.inf
+            
+            # 创建距离范围标签
+            distance_labels = []
+            for i in range(len(distance_thresholds) - 1):
+                if i == 0:
+                    label = f"Distance_0_{distance_thresholds[i+1]:.2f}km"
+                elif i == len(distance_thresholds) - 2:
+                    label = f"Distance_{distance_thresholds[i]:.2f}km_plus"
+                else:
+                    label = f"Distance_{distance_thresholds[i]:.2f}_{distance_thresholds[i+1]:.2f}km"
+                distance_labels.append(label)
+        
+        print(f"\n距离范围阈值（公里）:")
+        for i in range(len(distance_thresholds) - 1):
+            print(f"  范围 {i+1}: {distance_thresholds[i]:.2f} - {distance_thresholds[i+1]:.2f} km")
+        
+        # 为每条记录分配距离范围
+        def assign_distance_range(distance):
+            """根据距离值分配距离范围"""
+            if np.isnan(distance):
+                return "Distance_NaN"
+            for i in range(len(distance_thresholds) - 1):
+                if distance_thresholds[i] <= distance < distance_thresholds[i+1]:
+                    return distance_labels[i]
+            # 如果距离等于最后一个阈值（inf），分配到最后一个范围
+            return distance_labels[-1]
+        
+        self.data['geo_cluster'] = [assign_distance_range(d) for d in route_distances]
+        
+        # 保存阈值信息（可选，用于后续分析）
+        self.distance_thresholds = distance_thresholds
+        self.distance_labels = distance_labels
+        
+        # 统计距离范围信息
         cluster_info = self.data.groupby('geo_cluster').agg({
-            'fare_amount': ['count', 'mean'],
+            'fare_amount': ['count', 'mean', 'std'],
+            'route_distance_km': ['mean', 'min', 'max']
         }).round(2)
-        cluster_info.columns = ['cluster_size', 'avg_fare']
+        cluster_info.columns = ['cluster_size', 'avg_fare', 'std_fare', 
+                               'avg_distance', 'min_distance', 'max_distance']
         
-        print(f"\n地理聚类统计（网格大小: {grid_size}x{grid_size}）:")
-        print(f"总聚类数: {len(cluster_info)}")
-        print(f"平均每个聚类大小: {cluster_info['cluster_size'].mean():.0f}")
-        print("\n前10个最大聚类:")
-        print(cluster_info.nlargest(10, 'cluster_size'))
+        print(f"\n距离范围分层统计:")
+        print(f"总范围数: {len(cluster_info)}")
+        print(f"平均每个范围大小: {cluster_info['cluster_size'].mean():.0f}")
+        print(f"范围大小标准差: {cluster_info['cluster_size'].std():.0f}")
+        print(f"平均车费标准差（层内方差）: {cluster_info['std_fare'].mean():.2f}")
+        print("\n各距离范围详细信息:")
+        print(cluster_info.sort_values('avg_distance'))
+        
+        # 计算分层质量指标
+        within_cluster_variance = cluster_info['std_fare'].mean()
+        between_cluster_variance = cluster_info['avg_fare'].std()
+        print(f"\n分层质量指标:")
+        print(f"  层内平均标准差: {within_cluster_variance:.2f}")
+        print(f"  层间标准差: {between_cluster_variance:.2f}")
+        if within_cluster_variance > 0:
+            print(f"  层间/层内比率: {between_cluster_variance/within_cluster_variance:.2f} (越大越好)")
+        
+        # 显示距离与车费的关系
+        print(f"\n距离与车费关系:")
+        distance_fare_corr = self.data[['route_distance_km', 'fare_amount']].corr().iloc[0, 1]
+        print(f"  距离与车费的相关系数: {distance_fare_corr:.3f}")
         
         return cluster_info
     
-    def create_passenger_strata(self):
+    def create_passenger_strata(self, simplify=False):
         """
         第三层：按乘客人数分层
         
         将乘客人数分为若干层（例如：1人、2人、3-4人、5人及以上）
+        
+        Parameters:
+        -----------
+        simplify : bool, default=False
+            如果为True，只分2层（1人 vs 2+人），减少层数
         """
         print("\n=== 第三层：创建乘客人数分层 ===")
         
-        def assign_passenger_stratum(passenger_count):
-            """将乘客人数映射到分层"""
-            if passenger_count == 1:
-                return '1_passenger'
-            elif passenger_count == 2:
-                return '2_passengers'
-            elif passenger_count <= 4:
-                return '3-4_passengers'
-            else:
-                return '5+_passengers'
+        if simplify:
+            # 简化模式：只分2层（1人 vs 2+人）
+            def assign_passenger_stratum(passenger_count):
+                """将乘客人数映射到分层（简化模式：2层）"""
+                if passenger_count == 1:
+                    return '1_passenger'
+                else:
+                    return '2+_passengers'
+            print("使用简化模式：只分2层（1人 vs 2+人）")
+        else:
+            # 完整模式：分4层
+            def assign_passenger_stratum(passenger_count):
+                """将乘客人数映射到分层（完整模式：4层）"""
+                if passenger_count == 1:
+                    return '1_passenger'
+                elif passenger_count == 2:
+                    return '2_passengers'
+                elif passenger_count <= 4:
+                    return '3-4_passengers'
+                else:
+                    return '5+_passengers'
         
         self.data['passenger_stratum'] = self.data['passenger_count'].apply(assign_passenger_stratum)
         
@@ -169,11 +292,16 @@ class MultiStageSampling:
         
         return passenger_info
     
-    def allocate_sample_size(self):
+    def allocate_sample_size(self, method='neyman'):
         """
         样本量分配策略
         
         使用最优分配（Neyman分配）的思想，但需要平衡三层结构
+        
+        Parameters:
+        -----------
+        method : str, default='neyman'
+            分配方法：'proportional'（比例分配）或 'neyman'（Neyman最优分配）
         """
         print("\n=== 样本量分配 ===")
         
@@ -191,24 +319,92 @@ class MultiStageSampling:
         allocation_info.columns = ['N_h', 'mean_fare', 'std_fare']
         allocation_info['std_fare'] = allocation_info['std_fare'].fillna(0)
         
-        # 简化的比例分配（按层大小）
-        # 更复杂的话可以用Neyman最优分配
-        total_N = allocation_info['N_h'].sum()
-        allocation_info['allocation'] = (
-            allocation_info['N_h'] / total_N * self.target_sample_size
-        ).astype(int)
+        # 只考虑有效的单元（N_h > 0）
+        valid_units = allocation_info[allocation_info['N_h'] > 0].copy()
+        n_valid_units = len(valid_units)
         
-        # 确保每个单元至少分配到1个样本（如果原大小>0）
-        allocation_info.loc[allocation_info['allocation'] == 0, 'allocation'] = 1
-        allocation_info.loc[allocation_info['N_h'] == 0, 'allocation'] = 0
+        if method == 'neyman':
+            # Neyman最优分配：n_h = n * (N_h * σ_h) / Σ(N_h * σ_h)
+            # 考虑有限总体修正
+            total_N = valid_units['N_h'].sum()
+            # 使用标准差进行最优分配
+            valid_units['N_sigma'] = valid_units['N_h'] * valid_units['std_fare']
+            total_N_sigma = valid_units['N_sigma'].sum()
+            
+            if total_N_sigma > 0:
+                # 初始分配（连续值）
+                valid_units['allocation_float'] = (
+                    self.target_sample_size * valid_units['N_sigma'] / total_N_sigma
+                )
+            else:
+                # 如果所有标准差为0，回退到比例分配
+                valid_units['allocation_float'] = (
+                    self.target_sample_size * valid_units['N_h'] / total_N
+                )
+            print("使用Neyman最优分配")
+        else:
+            # 比例分配：n_h = n * N_h / N
+            total_N = valid_units['N_h'].sum()
+            valid_units['allocation_float'] = (
+                self.target_sample_size * valid_units['N_h'] / total_N
+            )
+            print("使用比例分配")
         
-        # 确保 allocation 列始终是整数类型
+        # 先向下取整
+        valid_units['allocation'] = valid_units['allocation_float'].astype(int)
+        
+        # 如果样本量足够大，确保每个有效单元至少分配到1个样本
+        if self.target_sample_size >= n_valid_units:
+            # 确保每个单元至少1个样本
+            valid_units.loc[valid_units['allocation'] == 0, 'allocation'] = 1
+        else:
+            # 样本量不足，只保留分配数>=1的单元
+            print(f"警告：样本量({self.target_sample_size})小于有效单元数({n_valid_units})，"
+                  f"将只从较大的单元中抽样")
+        
+        # 调整总样本量，使其精确等于目标样本量
+        actual_sample_size = valid_units['allocation'].sum()
+        difference = self.target_sample_size - actual_sample_size
+        
+        if difference != 0:
+            # 计算每个单元的分配误差（小数部分）
+            valid_units['remainder'] = valid_units['allocation_float'] - valid_units['allocation']
+            # 按误差大小排序，优先分配给误差大的单元
+            valid_units = valid_units.sort_values('remainder', ascending=False)
+            
+            # 调整分配，使总样本量等于目标值
+            if difference > 0:
+                # 需要增加样本量
+                for idx in valid_units.index[:difference]:
+                    valid_units.loc[idx, 'allocation'] += 1
+            else:
+                # 需要减少样本量（从误差最小的单元开始）
+                for idx in valid_units.index[difference:]:
+                    if valid_units.loc[idx, 'allocation'] > 1:
+                        valid_units.loc[idx, 'allocation'] -= 1
+                        difference += 1
+                        if difference == 0:
+                            break
+                # 如果还有剩余，从分配数最大的单元减少
+                if difference < 0:
+                    for idx in valid_units.nlargest(-difference, 'allocation').index:
+                        if valid_units.loc[idx, 'allocation'] > 1:
+                            valid_units.loc[idx, 'allocation'] -= 1
+                            difference += 1
+                            if difference == 0:
+                                break
+        
+        # 将结果合并回allocation_info
+        allocation_info['allocation'] = 0
+        allocation_info.loc[valid_units.index, 'allocation'] = valid_units['allocation']
         allocation_info['allocation'] = allocation_info['allocation'].astype(int)
         
-        # 调整总样本量（可能会略大于目标样本量）
+        # 验证总样本量
         actual_sample_size = allocation_info['allocation'].sum()
         print(f"目标样本量: {self.target_sample_size:,}")
         print(f"实际分配样本量: {actual_sample_size:,}")
+        if actual_sample_size != self.target_sample_size:
+            print(f"警告：实际分配样本量({actual_sample_size})与目标样本量({self.target_sample_size})不一致")
         print(f"\n分配统计：")
         print(f"有效单元数: {(allocation_info['allocation'] > 0).sum()}")
         print(f"平均每单元样本量: {allocation_info[allocation_info['allocation'] > 0]['allocation'].mean():.1f}")
@@ -600,7 +796,7 @@ class MultiStageSampling:
             'bootstrap_means': bootstrap_means
         }
     
-    def estimate_mean_fare(self, enable_bootstrap=False, n_bootstrap=1000, bootstrap_alpha=0.05):
+    def estimate_mean_fare(self, enable_bootstrap=False, n_bootstrap=1000, bootstrap_alpha=0.05, verbose=True):
         """
         估计总体平均车费
         
@@ -614,8 +810,11 @@ class MultiStageSampling:
             Bootstrap重抽样次数（仅在enable_bootstrap=True时使用）
         bootstrap_alpha : float, default=0.05
             Bootstrap显著性水平（仅在enable_bootstrap=True时使用）
+        verbose : bool, default=True
+            是否打印详细信息
         """
-        print("\n=== 估计总体平均车费 ===")
+        if verbose:
+            print("\n=== 估计总体平均车费 ===")
         
         if self.final_sample is None:
             raise ValueError("请先执行抽样！")
@@ -633,10 +832,11 @@ class MultiStageSampling:
         ci_95_lower = sample_mean - 1.96 * se_simple
         ci_95_upper = sample_mean + 1.96 * se_simple
         
-        print(f"\n【简单估计】（假设SRS）:")
-        print(f"样本均值: ${sample_mean:.2f}")
-        print(f"标准误: ${se_simple:.2f}")
-        print(f"95%置信区间: [${ci_95_lower:.2f}, ${ci_95_upper:.2f}]")
+        if verbose:
+            print(f"\n【简单估计】（假设SRS）:")
+            print(f"样本均值: ${sample_mean:.2f}")
+            print(f"标准误: ${se_simple:.2f}")
+            print(f"95%置信区间: [${ci_95_lower:.2f}, ${ci_95_upper:.2f}]")
         
         # 方法2：分层估计（考虑三层结构）
         # 使用分层抽样估计公式：\bar{y}_st = \sum_{h} W_h \bar{y}_h
@@ -688,45 +888,52 @@ class MultiStageSampling:
         ci_st_lower_theoretical = y_bar_st - 1.96 * se_st
         ci_st_upper_theoretical = y_bar_st + 1.96 * se_st
         
-        print(f"\n【分层估计】（考虑三层结构）:")
-        print(f"总体均值估计: ${y_bar_st:.2f}")
-        print(f"标准误: ${se_st:.2f}")
-        print(f"95%理论置信区间: [${ci_st_lower_theoretical:.2f}, ${ci_st_upper_theoretical:.2f}]")
+        if verbose:
+            print(f"\n【分层估计】（考虑三层结构）:")
+            print(f"总体均值估计: ${y_bar_st:.2f}")
+            print(f"标准误: ${se_st:.2f}")
+            print(f"95%理论置信区间: [${ci_st_lower_theoretical:.2f}, ${ci_st_upper_theoretical:.2f}]")
         
         # Bootstrap置信区间（可选）
         ci_bootstrap = None
         bootstrap_covers = None
         if enable_bootstrap:
-            print("\n正在计算Bootstrap置信区间...")
+            if verbose:
+                print("\n正在计算Bootstrap置信区间...")
             ci_bootstrap = self.bootstrap_confidence_interval(n_bootstrap=n_bootstrap, alpha=bootstrap_alpha)
             
-            print(f"95%Bootstrap置信区间: [${ci_bootstrap['lower']:.2f}, ${ci_bootstrap['upper']:.2f}]")
-            print(f"Bootstrap方法: {ci_bootstrap['method']}")
+            if verbose:
+                print(f"95%Bootstrap置信区间: [${ci_bootstrap['lower']:.2f}, ${ci_bootstrap['upper']:.2f}]")
+                print(f"Bootstrap方法: {ci_bootstrap['method']}")
         
         # 总体均值（真实值，用于比较）
         true_mean = self.data['fare_amount'].mean()
-        print(f"\n【真实总体均值】: ${true_mean:.2f}")
-        print(f"估计偏差: ${y_bar_st - true_mean:.2f}")
-        print(f"相对误差: {abs(y_bar_st - true_mean) / true_mean * 100:.2f}%")
+        if verbose:
+            print(f"\n【真实总体均值】: ${true_mean:.2f}")
+            print(f"估计偏差: ${y_bar_st - true_mean:.2f}")
+            print(f"相对误差: {abs(y_bar_st - true_mean) / true_mean * 100:.2f}%")
         
         # 置信区间覆盖情况
         theoretical_covers = (ci_st_lower_theoretical <= true_mean <= ci_st_upper_theoretical)
         if enable_bootstrap and ci_bootstrap is not None:
             bootstrap_covers = (ci_bootstrap['lower'] <= true_mean <= ci_bootstrap['upper'])
-            print(f"\n置信区间覆盖情况（真实均值是否在区间内）:")
-            print(f"  理论CI: {'✓ 覆盖' if theoretical_covers else '✗ 未覆盖'}")
-            print(f"  Bootstrap CI: {'✓ 覆盖' if bootstrap_covers else '✗ 未覆盖'}")
+            if verbose:
+                print(f"\n置信区间覆盖情况（真实均值是否在区间内）:")
+                print(f"  理论CI: {'✓ 覆盖' if theoretical_covers else '✗ 未覆盖'}")
+                print(f"  Bootstrap CI: {'✓ 覆盖' if bootstrap_covers else '✗ 未覆盖'}")
         else:
-            print(f"\n置信区间覆盖情况（真实均值是否在区间内）:")
-            print(f"  理论CI: {'✓ 覆盖' if theoretical_covers else '✗ 未覆盖'}")
+            if verbose:
+                print(f"\n置信区间覆盖情况（真实均值是否在区间内）:")
+                print(f"  理论CI: {'✓ 覆盖' if theoretical_covers else '✗ 未覆盖'}")
         
         # 设计效应（Design Effect）
         deff = (se_st / se_simple) ** 2
-        print(f"\n设计效应 (Deff): {deff:.4f}")
-        if deff < 1:
-            print("✓ 分层抽样比简单随机抽样更高效！")
-        elif deff > 1:
-            print("⚠ 分层抽样的效率略低于简单随机抽样（可能是由于聚类效应）")
+        if verbose:
+            print(f"\n设计效应 (Deff): {deff:.4f}")
+            if deff < 1:
+                print("✓ 分层抽样比简单随机抽样更高效！")
+            elif deff > 1:
+                print("⚠ 分层抽样的效率略低于简单随机抽样（可能是由于聚类效应）")
         
         result = {
             'simple_mean': sample_mean,
@@ -1397,6 +1604,21 @@ def main():
         help='Bootstrap显著性水平（仅在启用Bootstrap时有效，默认: 0.05）'
     )
     
+    parser.add_argument(
+        '--cluster-method',
+        type=str,
+        default='distance',
+        choices=['grid', 'distance', 'route'],
+        help='地理聚类方法：grid（网格）, distance（距离聚类）, route（路线相似性聚类，默认: distance）'
+    )
+    
+    parser.add_argument(
+        '--n-clusters',
+        type=int,
+        default=50,
+        help='聚类数量（仅用于distance和route方法，默认: 50）'
+    )
+    
     args = parser.parse_args()
     
     # 初始化抽样设计
@@ -1410,7 +1632,7 @@ def main():
     
     # 执行各层设计
     sampler.create_time_strata()
-    sampler.create_geographic_clusters()
+    sampler.create_geographic_clusters(method=args.cluster_method, n_clusters=args.n_clusters)
     sampler.create_passenger_strata()
     
     # ===== 方法1：已知真实比例的方法 =====
